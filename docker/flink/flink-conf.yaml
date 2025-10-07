@@ -1,0 +1,40 @@
+# JobManager settings
+jobmanager.rpc.address: flink-jobmanager
+jobmanager.rpc.port: 6123
+jobmanager.bind-host: 0.0.0.0
+jobmanager.memory.process.size: 1024m
+
+# TaskManager settings
+taskmanager.bind-host: 0.0.0.0
+taskmanager.rpc.port: 6122
+taskmanager.memory.process.size: 1024m
+taskmanager.numberOfTaskSlots: 2
+
+# Checkpointing
+state.backend: filesystem
+state.checkpoints.dir: file:///opt/flink/data/checkpoint
+state.savepoints.dir: file:///opt/flink/data/checkpoint
+
+# Web UI
+rest.port: 8081
+rest.bind-address: 0.0.0.0
+
+# Parallelism
+parallelism.default: 2
+
+# High availability (disabled for simplicity)
+high-availability: none
+
+# Metrics
+metrics.reporters: slf4j
+metrics.reporter.slf4j.class: org.apache.flink.metrics.slf4j.Slf4jReporter
+metrics.reporter.slf4j.interval: 10 SECONDS
+
+# Execution
+execution.checkpointing.interval: 5000
+execution.checkpointing.min-pause: 1000
+execution.checkpointing.timeout: 60000
+execution.checkpointing.max-concurrent-checkpoints: 1
+
+# Watermark
+pipeline.auto-watermark-interval: 200

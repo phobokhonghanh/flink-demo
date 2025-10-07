@@ -1,0 +1,222 @@
+version: '3.8'
+
+services:
+  kafka:
+    image: kafka_custom:latest
+    hostname: kafka 
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+    environment:
+      # KRaft Configuration
+      - KAFKA_ENABLE_KRAFT=yes
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_KRAFT_CLUSTER_ID=abcdefghijklmnopqrstuv
+      
+      # Listeners Configuration
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      
+      # Topic Configuration
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_CFG_DEFAULT_REPLICATION_FACTOR=1
+      - KAFKA_CFG_MIN_INSYNC_REPLICAS=1
+      
+      # Performance Settings
+      - KAFKA_CFG_NUM_PARTITIONS=4
+      - KAFKA_CFG_LOG_RETENTION_HOURS=1
+      - KAFKA_CFG_LOG_SEGMENT_BYTES=268435456
+      - KAFKA_CFG_LOG_RETENTION_CHECK_INTERVAL_MS=300000
+      
+      # JVM Settings
+      - KAFKA_HEAP_OPTS=-Xmx512M -Xms512M
+      
+      # Bitnami specific
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_BROKER_ID=1
+      
+    ports:
+      - "29092:9094"  # External access
+      - "9092:9092"   # Internal access (for debugging)
+    networks:
+      flink-network:
+        aliases:  # ← QUAN TRỌNG
+          - kafka
+          - kafka-broker
+    volumes:
+      - kafka-data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server kafka:9092 --list || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Flink JobManager
+  flink-jobmanager:
+    image: flink_custom:latest
+    hostname: job-manager
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+    command: >
+      bash -c "
+        echo 'Starting JobManager...' &&
+        /opt/flink/bin/jobmanager.sh start &&
+        echo 'Starting SQL Gateway...' &&
+        /opt/flink/bin/sql-gateway.sh start -Dsql-gateway.endpoint.rest.address=0.0.0.0 &&
+        echo 'Both services started!' &&
+        tail -f /dev/null
+      "
+    environment:
+      - "FLINK_PROPERTIES=jobmanager.rpc.address: flink-jobmanager"
+    ports:
+      - "8081:8081"
+      - "6123:6123"
+      - "8888:8888" 
+    volumes:
+      - flink-jobs:/opt/flink/jobs
+      - flink-data:/opt/flink/data
+    networks:
+      - flink-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/overview || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Flink TaskManager
+  flink-taskmanager:
+    image: flink_custom:latest
+    deploy:
+      replicas: 1
+      placement:
+        # max_replicas_per_node: 1
+        constraints: [node.role == manager]
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    environment:
+      - "FLINK_PROPERTIES=jobmanager.rpc.address: flink-jobmanager"
+    ports:
+      - "6122:6122"
+    volumes:
+      - flink-jobs:/opt/flink/jobs
+      - flink-data:/opt/flink/data
+    networks:
+      - flink-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://flink-jobmanager:8081/taskmanagers | grep -q 'id'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  pyjob-flink:
+    image: pyjob-flink:latest
+    hostname: pyjob-flink
+    command: "tail -f /dev/null"
+    ports:
+      - 4040:4040
+    depends_on:
+      - flink-jobmanager
+      - flink-taskmanager
+    env_file:
+      - ${PROJECT_DIR:-.}/configs/.prod.env
+    volumes:
+      - ${PROJECT_DIR:-.}:/opt/itc
+      - flink_history_server_logs:/opt/flink/log 
+    networks:
+      - flink-network
+
+  # MinIO for Delta Lake storage
+  # minio:
+  #   image: minio/minio:latest
+  #   deploy:
+  #     replicas: 1
+  #     placement:
+  #       constraints: [node.role == manager]
+  #   command: server /data --console-address ":9001"
+  #   environment:
+  #     MINIO_ACCESS_KEY: "minioadmin"
+  #     MINIO_SECRET_KEY: "minioadmin"
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
+  #   volumes:
+  #     - minio-data:/data
+  #   networks:
+  #     - flink-network
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+
+  # # Data Generator
+  # data-generator:
+  #   image: flink-demo/data-generator:latest
+  #   deploy:
+  #     replicas: 1
+  #     placement:
+  #       constraints: [node.role == manager]
+  #   depends_on:
+  #     - kafka
+  #   environment:
+  #     KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  #     KAFKA_TOPIC: "transactions"
+  #   networks:
+  #     - flink-network
+
+  # Monitoring Dashboard (Custom)
+  dashboard:
+    image: monitoring_custom:latest
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+        delay: 45s
+        max_attempts: 3
+    ports:
+      - "8080:8080"
+    depends_on:
+      - flink-jobmanager
+      - kafka
+    environment:
+      - FLINK_JOBMANAGER_URL=http://flink-jobmanager:8081
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - FLASK_ENV=development
+      - FLASK_DEBUG=true
+    networks:
+      - flink-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 120s
+
+networks:
+  flink-network:
+    driver: overlay
+    attachable: true
+
+volumes:
+  kafka-data:
+  # minio-data:
+  flink-jobs:
+  flink-data:
+  flink_history_server_logs:
